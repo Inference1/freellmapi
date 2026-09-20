@@ -5,6 +5,20 @@ const DEFAULT_BUFFER_MS = 10_000;
 const DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_HALF_LIFE_MS = 2 * 24 * 60 * 60 * 1000;
 const CACHE_TTL_MS = 60_000;
+// One lucky 90s success must not triple an endpoint's patience: below this
+// many in-window successes the history is an anecdote, not a distribution.
+const DEFAULT_MIN_SAMPLES = 5;
+// Logged TTFB runs from request start, so it includes the hops that failed
+// before the endpoint was reached. A widened budget admits later successes,
+// which log a larger TTFB, which widens the budget again — without a ceiling
+// the allowance ratchets up by one buffer per refresh. Cap it at a multiple of
+// the operator's base budget, which stays the declared unit of patience.
+const MAX_BUDGET_MULTIPLIER = 3;
+// The buffer is absolute, so against a small operator budget (say 6s) it would
+// hand a 200ms endpoint 10s of patience. Only an endpoint whose P95 is itself a
+// large share of the base counts as slow; with the 45s default this changes
+// nothing, because a P95 under 22.5s plus the buffer already fits the base.
+const SLOW_P95_BASE_FRACTION = 0.5;
 
 export interface EndpointTtfbStats {
   p50Ms: number;
@@ -17,6 +31,7 @@ interface Config {
   bufferMs: number;
   windowMs: number;
   halfLifeMs: number;
+  minSamples: number;
 }
 
 interface Sample {
@@ -40,7 +55,7 @@ export function invalidateTtfbBudgetCache(): void {
 function readConfig(db: Db): Config {
   const rows = db.prepare(`
     SELECT key, value FROM settings
-    WHERE key IN ('slow_endpoint_buffer_ms', 'ttfb_budget_window_ms', 'ttfb_budget_half_life_ms')
+    WHERE key IN ('slow_endpoint_buffer_ms', 'ttfb_budget_window_ms', 'ttfb_budget_half_life_ms', 'ttfb_budget_min_samples')
   `).all() as { key: string; value: string }[];
   const settings = new Map(rows.map(row => [row.key, row.value]));
   const duration = (key: string, fallback: number, allowZero = false): number => {
@@ -55,6 +70,7 @@ function readConfig(db: Db): Config {
     bufferMs: duration('slow_endpoint_buffer_ms', DEFAULT_BUFFER_MS, true),
     windowMs: duration('ttfb_budget_window_ms', DEFAULT_WINDOW_MS),
     halfLifeMs: duration('ttfb_budget_half_life_ms', DEFAULT_HALF_LIFE_MS),
+    minSamples: duration('ttfb_budget_min_samples', DEFAULT_MIN_SAMPLES),
   };
 }
 
@@ -156,9 +172,11 @@ export function getEndpointTimeBudgetMs(
     const db = getDb();
     const config = readConfig(db);
     const stats = statsFor(db, config, now).get(endpointKey(platform, endpointScope));
-    if (!stats || stats.p95Ms <= 0) return baseBudgetMs;
+    if (!stats || stats.p95Ms <= 0 || stats.sampleCount < config.minSamples
+      || stats.p95Ms < baseBudgetMs * SLOW_P95_BASE_FRACTION) return baseBudgetMs;
     const adaptiveBudget = stats.p95Ms + config.bufferMs;
-    return Number.isFinite(adaptiveBudget) ? Math.max(baseBudgetMs, adaptiveBudget) : baseBudgetMs;
+    if (!Number.isFinite(adaptiveBudget)) return baseBudgetMs;
+    return Math.max(baseBudgetMs, Math.min(adaptiveBudget, baseBudgetMs * MAX_BUDGET_MULTIPLIER));
   } catch {
     // Missing/locked DB or a bad log must not break the proxy hot path.
     invalidateTtfbBudgetCache();

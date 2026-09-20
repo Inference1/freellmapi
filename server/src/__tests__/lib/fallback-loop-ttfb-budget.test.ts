@@ -104,6 +104,7 @@ describe('endpoint TTFB-aware fallback budget (#1262)', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubEnv('TTFB_BUDGET_DISABLED', '');
+    vi.stubEnv('TTFB_BUDGET_MIN_SAMPLES', '1');
     vi.stubEnv('SLOW_ENDPOINT_BUFFER_MS', '10000');
     vi.stubEnv('TTFB_BUDGET_WINDOW_MS', '604800000');
     vi.stubEnv('TTFB_BUDGET_HALF_LIFE_MS', '172800000');

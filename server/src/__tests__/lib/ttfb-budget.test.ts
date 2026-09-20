@@ -32,6 +32,7 @@ describe('endpoint TTFB budgets (#1262)', () => {
     vi.stubEnv('DEV_MODE', 'true');
     vi.stubEnv('NODE_ENV', 'test');
     vi.stubEnv('TTFB_BUDGET_DISABLED', '');
+    vi.stubEnv('TTFB_BUDGET_MIN_SAMPLES', '1');
     vi.stubEnv('SLOW_ENDPOINT_BUFFER_MS', '');
     vi.stubEnv('TTFB_BUDGET_WINDOW_MS', '');
     vi.stubEnv('TTFB_BUDGET_HALF_LIFE_MS', '');
@@ -60,6 +61,30 @@ describe('endpoint TTFB budgets (#1262)', () => {
     expect(getEndpointTtfbStats('google', '', NOW)).toEqual({
       p50Ms: 10_000, p95Ms: 19_000, sampleCount: 20, weightedSamples: 20,
     });
+  });
+
+  it('needs five successes by default before one slow anecdote widens the budget', () => {
+    vi.stubEnv('TTFB_BUDGET_MIN_SAMPLES', '');
+    for (let i = 0; i < 4; i++) addRequest(60_000);
+    expect(getEndpointTimeBudgetMs(45_000, 'google', '', NOW)).toBe(45_000);
+    addRequest(60_000);
+    invalidateTtfbBudgetCache();
+    expect(getEndpointTimeBudgetMs(45_000, 'google', '', NOW)).toBe(70_000);
+    setSetting('ttfb_budget_min_samples', '6');
+    expect(getEndpointTimeBudgetMs(45_000, 'google', '', NOW)).toBe(45_000);
+  });
+
+  it('caps the learned allowance at three times the base so it cannot ratchet', () => {
+    addRequest(500_000);
+    expect(getEndpointTimeBudgetMs(45_000, 'google', '', NOW)).toBe(135_000);
+    expect(getEndpointTimeBudgetMs(6_000, 'google', '', NOW)).toBe(18_000);
+  });
+
+  it('keeps a small base budget for a fast endpoint despite the absolute buffer', () => {
+    addRequest(200);
+    addRequest(5_000, { platform: 'groq' });
+    expect(getEndpointTimeBudgetMs(6_000, 'google', '', NOW)).toBe(6_000);
+    expect(getEndpointTimeBudgetMs(6_000, 'groq', '', NOW)).toBe(15_000);
   });
 
   it('does not widen the budget from a zero TTFB observation alone', () => {
